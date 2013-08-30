@@ -41,7 +41,6 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
 import android.graphics.Bitmap.CompressFormat;
-import android.graphics.Rect;
 import android.media.MediaScannerConnection;
 import android.media.MediaScannerConnection.MediaScannerConnectionClient;
 import android.net.Uri;
@@ -85,7 +84,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
     private int mediaType;                  // What type of media to retrieve
     private boolean saveToPhotoAlbum;       // Should the picture be saved to the device's photo album
     private boolean correctOrientation;     // Should the pictures orientation be corrected
-    //private boolean allowEdit;              // Should we allow the user to crop the image. UNUSED.
+    private boolean allowEdit;              // Should we allow the user to crop the image.
 
     public CallbackContext callbackContext;
     private int numPics;
@@ -138,7 +137,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
             this.targetHeight = args.getInt(4);
             this.encodingType = args.getInt(5);
             this.mediaType = args.getInt(6);
-            //this.allowEdit = args.getBoolean(7); // This field is unused.
+            this.allowEdit = args.getBoolean(7);
             this.correctOrientation = args.getBoolean(8);
             this.saveToPhotoAlbum = args.getBoolean(9);
 
@@ -290,7 +289,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
 
                     // If sending base64 image back
                     if (destType == DATA_URL) {
-                        bitmap = getScaledBitmap(FileHelper.stripFileProtocol(imageUri.toString()));
+                        bitmap = getScaledAndCroppedBitmap(FileHelper.stripFileProtocol(imageUri.toString()));
                         if (bitmap == null) {
                             // Try to get the bitmap from intent.
                             bitmap = (Bitmap)intent.getExtras().get("data");
@@ -327,12 +326,12 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
 
                         // If all this is true we shouldn't compress the image.
                         if (this.targetHeight == -1 && this.targetWidth == -1 && this.mQuality == 100 && 
-                                !this.correctOrientation) {
+                                !this.correctOrientation && !this.allowEdit) {
                             writeUncompressedImage(uri);
 
                             this.callbackContext.success(uri.toString());
                         } else {
-                            bitmap = getScaledBitmap(FileHelper.stripFileProtocol(imageUri.toString()));
+                            bitmap = getScaledAndCroppedBitmap(FileHelper.stripFileProtocol(imageUri.toString()));
 
                             if (rotate != 0 && this.correctOrientation) {
                                 bitmap = getRotatedBitmap(rotate, bitmap, exif);
@@ -394,7 +393,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
                     // This is a special case to just return the path as no scaling,
                     // rotating, nor compressing needs to be done
                     if (this.targetHeight == -1 && this.targetWidth == -1 &&
-                            (destType == FILE_URI || destType == NATIVE_URI) && !this.correctOrientation) {
+                            (destType == FILE_URI || destType == NATIVE_URI) && !this.correctOrientation && !this.allowEdit) {
                         this.callbackContext.success(uri.toString());
                     } else {
                         String uriString = uri.toString();
@@ -408,7 +407,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
                         }
                         Bitmap bitmap = null;
                         try {
-                            bitmap = getScaledBitmap(uriString);
+                            bitmap = getScaledAndCroppedBitmap(uriString);
                         } catch (IOException e) {
                             e.printStackTrace();
                         }
@@ -435,7 +434,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
                         // If sending filename back
                         else if (destType == FILE_URI || destType == NATIVE_URI) {
                             // Do we need to scale the returned file
-                            if (this.targetHeight > 0 && this.targetWidth > 0) {
+                            if ((this.targetHeight > 0 && this.targetWidth > 0) || this.allowEdit) {
                                 try {
                                     // Create an ExifHelper to save the exif data that is lost during compression
                                     String resizePath = DirectoryManager.getTempDirectoryPath(this.cordova.getActivity()) + "/resize.jpg";
@@ -489,6 +488,31 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
                 this.failPicture("Selection did not complete!");
             }
         }
+    }
+
+    private Bitmap cropBitmapToCenter (Bitmap srcBitmap)
+    {
+        Bitmap bitmap;
+        if (srcBitmap.getWidth() >= srcBitmap.getHeight()) {
+
+            bitmap = Bitmap.createBitmap(
+                    srcBitmap,
+                    srcBitmap.getWidth()/2 - srcBitmap.getHeight()/2,
+                    0,
+                    srcBitmap.getHeight(),
+                    srcBitmap.getHeight()
+            );
+        } else {
+
+            bitmap = Bitmap.createBitmap(
+                    srcBitmap,
+                    0,
+                    srcBitmap.getHeight()/2 - srcBitmap.getWidth()/2,
+                    srcBitmap.getWidth(),
+                    srcBitmap.getWidth()
+            );
+        }
+        return bitmap;
     }
 
     private int getImageOrientation(Uri uri) {
@@ -576,9 +600,9 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
      * @return
      * @throws IOException 
      */
-    private Bitmap getScaledBitmap(String imageUrl) throws IOException {
+    private Bitmap getScaledAndCroppedBitmap (String imageUrl) throws IOException {
         // If no new width or height were specified return the original bitmap
-        if (this.targetWidth <= 0 && this.targetHeight <= 0) {
+        if (this.targetWidth <= 0 && this.targetHeight <= 0 && !this.allowEdit) {
             return BitmapFactory.decodeStream(FileHelper.getInputStreamFromUriString(imageUrl, cordova));
         }
 
@@ -592,19 +616,57 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
         {
             return null;
         }
-        
-        // determine the correct aspect ratio
-        int[] widthHeight = calculateAspectRatio(options.outWidth, options.outHeight);
 
-        // Load in the smallest bitmap possible that is closest to the size we want
         options.inJustDecodeBounds = false;
-        options.inSampleSize = calculateSampleSize(options.outWidth, options.outHeight, this.targetWidth, this.targetHeight);
-        Bitmap unscaledBitmap = BitmapFactory.decodeStream(FileHelper.getInputStreamFromUriString(imageUrl, cordova), null, options);
-        if (unscaledBitmap == null) {
+        // Load in the smallest bitmap possible that is closest to the size we want
+        int[] targetWidthHeight = calculateTargetWidthHeight(options.outWidth, options.outHeight);
+        options.inSampleSize = calculateSampleSize(options.outWidth, options.outHeight, targetWidthHeight[0], targetWidthHeight[1]);
+        Bitmap bitmap = BitmapFactory.decodeStream(FileHelper.getInputStreamFromUriString(imageUrl, cordova), null, options);
+        if (bitmap == null) {
             return null;
         }
 
-        return Bitmap.createScaledBitmap(unscaledBitmap, widthHeight[0], widthHeight[1], true);
+        // determine the correct aspect ratio
+        int[] widthHeight = new int[2];
+        if(this.allowEdit)
+        {
+            bitmap = cropBitmapToCenter(bitmap);
+            widthHeight[0] = widthHeight[1] = bitmap.getWidth();
+        }
+        else
+        {
+            widthHeight = calculateAspectRatio(options.outWidth, options.outHeight);
+        }
+
+        // Do not scale if no target size is set
+        if(this.targetWidth <= 0 && this.targetHeight <= 0)
+        {
+            return bitmap;
+        }
+        return Bitmap.createScaledBitmap(bitmap, widthHeight[0], widthHeight[1], true);
+    }
+
+    private int[] calculateTargetWidthHeight (int srcWidth, int srcHeight)
+    {
+        int[] targetWidthHeight = new int[2];
+        if(this.targetWidth <= 0 && this.targetHeight <= 0) {
+            targetWidthHeight[0] = srcWidth;
+            targetWidthHeight[1] = srcHeight;
+        } else if(this.allowEdit) {
+            float ratio = 1;
+            // When cropping the image to center, creating a smaller sample file may reduce it below the targeted crop size
+            if(srcHeight > srcWidth) {
+                ratio = (float) srcHeight / (float) srcWidth;
+            } else if(srcWidth > srcHeight) {
+                ratio = (float) srcWidth / (float) srcHeight;
+            }
+            targetWidthHeight[0] = Math.round(this.targetWidth * ratio);
+            targetWidthHeight[1] = Math.round(this.targetHeight * ratio);
+        } else {
+            targetWidthHeight[0] = this.targetWidth;
+            targetWidthHeight[1] = this.targetHeight;
+        }
+        return targetWidthHeight;
     }
 
     /**
