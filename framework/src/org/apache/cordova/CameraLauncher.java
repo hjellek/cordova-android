@@ -631,7 +631,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
         if(this.allowEdit)
         {
             bitmap = cropBitmapToCenter(bitmap);
-            widthHeight[0] = widthHeight[1] = bitmap.getWidth();
+            widthHeight = calculateAspectRatio(bitmap.getWidth(), bitmap.getHeight());
         }
         else
         {
